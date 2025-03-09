@@ -1,0 +1,10 @@
+[package]
+name = "xdp-screencast"
+version = "0.1.0"
+edition = "2024"
+authors = ["dlzht"]
+
+
+[dependencies]
+zbus = "5.1"
+bitflags = "2.9"
