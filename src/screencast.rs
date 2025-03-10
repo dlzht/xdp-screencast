@@ -1,6 +1,6 @@
+use bitflags::bitflags;
 use std::collections::HashMap;
 use std::os::fd::{AsRawFd, RawFd};
-use bitflags::bitflags;
 use zbus::export::ordered_stream::OrderedStreamExt;
 use zbus::zvariant::{ObjectPath, OwnedFd, OwnedObjectPath, Value};
 use zbus::{proxy, zvariant, Connection, Error, Result};
@@ -15,22 +15,41 @@ pub struct ScreenCast<'a> {
     dbus_name: String,
     selected_sources: Vec<SelectedSource>,
     connection: Option<Connection>,
-    proxy: Option<ZBusScreencastProxy<'a>>,
+    screencast_proxy: Option<ZBusScreencastProxy<'a>>,
+    response_stream: Option<ResponseStream>,
     session: OwnedObjectPath,
     counter: usize,
 }
-
-const REQUEST_PATH: &str = "";
 
 impl<'a> ScreenCast<'a> {
     pub async fn screencast(&mut self) -> Result<RawFd> {
         if self.connection.is_none() {
             let connection = Connection::session().await?;
-            let proxy = ZBusScreencastProxy::new(&connection).await?;
+
+            let dbus_name = connection
+                .unique_name()
+                .ok_or(Error::Names(zbus::names::Error::InvalidName("None")))
+                .map(|n| n.to_string().replace(":", ""))
+                .map(|n| n.replace(".", "_"))?;
+            self.dbus_name = dbus_name;
+
+            let screencast_proxy = ZBusScreencastProxy::new(&connection).await?;
+            self.screencast_proxy = Some(screencast_proxy);
+
             self.connection = Some(connection);
-            self.proxy = Some(proxy);
         }
         self.counter += 1;
+
+        let request_proxy = ZBusRequestProxy::builder(self.connection.as_ref().unwrap())
+            .path(format!(
+                "/org/freedesktop/portal/desktop/request/{}/{}",
+                self.dbus_name, self.counter
+            ))?
+            .build()
+            .await?;
+        let response_stream = request_proxy.receive_response().await?;
+        self.response_stream = Some(response_stream);
+
         self.create_session().await?;
         self.prepare_select().await?;
         self.start_select().await?;
@@ -51,23 +70,21 @@ impl<'a> ScreenCast<'a> {
         let handle_token_value = Value::new(self.counter.to_string());
         payload.insert("handle_token", &handle_token_value);
         let request_path = self
-            .proxy
+            .screencast_proxy
             .as_ref()
             .unwrap()
             .create_session(&payload)
             .await?;
 
-        println!("{:?}", request_path);
-
-        let request_proxy = ZBusRequestProxy::builder(self.connection.as_ref().unwrap())
-            .path(request_path)?
-            .build()
-            .await?;
-        let mut responses = request_proxy.receive_response().await?;
-
-        let response = responses.next().await.ok_or(Error::Failure(
-            "create session: fail to receive response".to_string(),
-        ))?;
+        let response =
+            self.response_stream
+                .as_mut()
+                .unwrap()
+                .next()
+                .await
+                .ok_or(Error::Failure(
+                    "create session: fail to receive response".to_string(),
+                ))?;
         let mut response = response.args()?;
 
         let session_handle = match response.response {
@@ -98,25 +115,27 @@ impl<'a> ScreenCast<'a> {
         let cursor_value = Value::U32(self.cursor_mode.to_u32());
         payload.insert("cursor_mode", &cursor_value);
         let request_path = self
-            .proxy
+            .screencast_proxy
             .as_ref()
             .unwrap()
             .select_sources(&self.session, &payload)
             .await?;
 
-        println!("{:?}", request_path);
-
-        // let request_proxy = ZBusRequestProxy::builder(self.connection.as_ref().unwrap())
-        //     .path(request_path)?
-        //     .build()
-        //     .await?;
-        // let mut responses = request_proxy.receive_response().await?;
-        // let response = responses.next().await
-        //   .ok_or(Error::Failure("select source: fail to receive response".to_string()))?;
-        // let response = response.args()?;
-        // if response.response != 0 {
-        //   return Err(Error::Failure("select source: fail to get select source".to_string()));
-        // }
+        let response =
+            self.response_stream
+                .as_mut()
+                .unwrap()
+                .next()
+                .await
+                .ok_or(Error::Failure(
+                    "select source: fail to receive response".to_string(),
+                ))?;
+        let response = response.args()?;
+        if response.response != 0 {
+            return Err(Error::Failure(
+                "select source: fail to get select source".to_string(),
+            ));
+        }
         Ok(())
     }
 
@@ -124,22 +143,22 @@ impl<'a> ScreenCast<'a> {
         let mut payload = HashMap::with_capacity(4);
         let handle_token_value = Value::new(self.counter.to_string());
         payload.insert("handle_token", &handle_token_value);
-        let request_path = self
-            .proxy
+        let _ = self
+            .screencast_proxy
             .as_ref()
             .unwrap()
             .start(&self.session, "", &payload)
             .await?;
 
-        let request_proxy = ZBusRequestProxy::builder(self.connection.as_ref().unwrap())
-            .path(request_path)?
-            .build()
-            .await?;
-        let mut responses = request_proxy.receive_response().await?;
-
-        let response = responses.next().await.ok_or(Error::Failure(
-            "start select: fail to receive response".to_string(),
-        ))?;
+        let response =
+            self.response_stream
+                .as_mut()
+                .unwrap()
+                .next()
+                .await
+                .ok_or(Error::Failure(
+                    "start select: fail to receive response".to_string(),
+                ))?;
         let mut response = response.args()?;
         let sources = match response.response {
             0 => response.results.remove("streams"),
@@ -153,17 +172,15 @@ impl<'a> ScreenCast<'a> {
         Ok(())
     }
 
-
     async fn open_remote(&mut self) -> Result<RawFd> {
         self.counter += 1;
         let payload = HashMap::new();
-        self
-          .proxy
-          .as_ref()
-          .unwrap()
-          .open_pipe_wire_remote(&self.session, &payload)
-          .await
-          .map(|fd| fd.as_raw_fd())
+        self.screencast_proxy
+            .as_ref()
+            .unwrap()
+            .open_pipe_wire_remote(&self.session, &payload)
+            .await
+            .map(|fd| fd.as_raw_fd())
     }
 }
 
@@ -292,7 +309,7 @@ impl PersistMode {
         match self {
             PersistMode::DoNotPersist => 0,
             PersistMode::AsApplication => 1,
-            PersistMode::UntilRevoked => 2
+            PersistMode::UntilRevoked => 2,
         }
     }
 }
