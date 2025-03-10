@@ -12,6 +12,7 @@ pub struct ScreenCast<'a> {
     pub persist_mode: PersistMode,
     pub multiple_source: bool,
 
+    dbus_name: String,
     selected_sources: Vec<SelectedSource>,
     connection: Option<Connection>,
     proxy: Option<ZBusScreencastProxy<'a>>,
@@ -19,12 +20,17 @@ pub struct ScreenCast<'a> {
     counter: usize,
 }
 
+const REQUEST_PATH: &str = "";
+
 impl<'a> ScreenCast<'a> {
     pub async fn screencast(&mut self) -> Result<RawFd> {
-        let connection = Connection::session().await?;
-        let proxy = ZBusScreencastProxy::new(&connection).await?;
-        self.connection = Some(connection);
-        self.proxy = Some(proxy);
+        if self.connection.is_none() {
+            let connection = Connection::session().await?;
+            let proxy = ZBusScreencastProxy::new(&connection).await?;
+            self.connection = Some(connection);
+            self.proxy = Some(proxy);
+        }
+        self.counter += 1;
         self.create_session().await?;
         self.prepare_select().await?;
         self.start_select().await?;
@@ -50,7 +56,8 @@ impl<'a> ScreenCast<'a> {
             .unwrap()
             .create_session(&payload)
             .await?;
-        self.counter += 1;
+
+        println!("{:?}", request_path);
 
         let request_proxy = ZBusRequestProxy::builder(self.connection.as_ref().unwrap())
             .path(request_path)?
@@ -85,7 +92,7 @@ impl<'a> ScreenCast<'a> {
         let multiple_value = Value::Bool(self.multiple_source);
         payload.insert("multiple", &multiple_value);
         let types_value = Value::U32(self.source_type.bits());
-        payload.insert("types", &types_value);
+        payload.insert("source_type", &types_value);
         let persist_value = Value::U32(self.persist_mode.to_u32());
         payload.insert("persist_mode", &persist_value);
         let cursor_value = Value::U32(self.cursor_mode.to_u32());
@@ -96,7 +103,8 @@ impl<'a> ScreenCast<'a> {
             .unwrap()
             .select_sources(&self.session, &payload)
             .await?;
-        self.counter += 1;
+
+        println!("{:?}", request_path);
 
         // let request_proxy = ZBusRequestProxy::builder(self.connection.as_ref().unwrap())
         //     .path(request_path)?
@@ -122,7 +130,6 @@ impl<'a> ScreenCast<'a> {
             .unwrap()
             .start(&self.session, "", &payload)
             .await?;
-        self.counter += 1;
 
         let request_proxy = ZBusRequestProxy::builder(self.connection.as_ref().unwrap())
             .path(request_path)?
@@ -291,12 +298,18 @@ impl PersistMode {
 }
 
 bitflags! {
-  #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
+  #[derive(Debug, Copy, Clone, PartialEq, Eq)]
   pub struct SourceType: u32 {
     const MONITOR = 1;
     const WINDOW = 2;
     const VIRTUAL = 4;
   }
+}
+
+impl Default for SourceType {
+    fn default() -> Self {
+        SourceType::MONITOR | SourceType::WINDOW | SourceType::VIRTUAL
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
