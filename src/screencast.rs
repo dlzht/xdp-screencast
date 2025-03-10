@@ -22,6 +22,10 @@ pub struct ScreenCast<'a> {
 }
 
 impl<'a> ScreenCast<'a> {
+    pub fn get_selected_sources(&self) -> &[SelectedSource] {
+        &self.selected_sources
+    }
+
     pub async fn screencast(&mut self) -> Result<RawFd> {
         if self.connection.is_none() {
             let connection = Connection::session().await?;
@@ -69,7 +73,7 @@ impl<'a> ScreenCast<'a> {
         payload.insert("session_handle_token", &session_token_value);
         let handle_token_value = Value::new(self.counter.to_string());
         payload.insert("handle_token", &handle_token_value);
-        let request_path = self
+        let _ = self
             .screencast_proxy
             .as_ref()
             .unwrap()
@@ -109,7 +113,7 @@ impl<'a> ScreenCast<'a> {
         let multiple_value = Value::Bool(self.multiple_source);
         payload.insert("multiple", &multiple_value);
         let types_value = Value::U32(self.source_type.bits());
-        payload.insert("source_type", &types_value);
+        payload.insert("types", &types_value);
         let persist_value = Value::U32(self.persist_mode.to_u32());
         payload.insert("persist_mode", &persist_value);
         let cursor_value = Value::U32(self.cursor_mode.to_u32());
@@ -140,7 +144,7 @@ impl<'a> ScreenCast<'a> {
     }
 
     async fn start_select(&mut self) -> Result<()> {
-        let mut payload = HashMap::with_capacity(4);
+        let mut payload = HashMap::with_capacity(1);
         let handle_token_value = Value::new(self.counter.to_string());
         payload.insert("handle_token", &handle_token_value);
         let _ = self
@@ -185,17 +189,17 @@ impl<'a> ScreenCast<'a> {
 }
 
 #[derive(Debug)]
-struct SelectedSource {
-    id: u32,
-    width: Option<i32>,
-    height: Option<i32>,
-    type_: u32,
+pub struct SelectedSource {
+    pub node: u32,
+    pub width: Option<i32>,
+    pub height: Option<i32>,
+    pub type_: u32,
 }
 
 impl SelectedSource {
     fn new(id: u32, type_: u32) -> Self {
         SelectedSource {
-            id,
+            node: id,
             width: None,
             height: None,
             type_,
@@ -325,7 +329,7 @@ bitflags! {
 
 impl Default for SourceType {
     fn default() -> Self {
-        SourceType::MONITOR | SourceType::WINDOW | SourceType::VIRTUAL
+        SourceType::MONITOR | SourceType::WINDOW
     }
 }
 
